@@ -191,6 +191,15 @@ def action_register(client, agent_name, capabilities, tags, state_file=None, **_
         if state_file:
             client.state_file = state_file
             client._persist()
+        rd = result["data"]
+        result["data"] = {
+            "name": agent_name,
+            "agent_id": rd.get("agent_id"),
+            "status": rd.get("status"),
+            "state_file": state_file,
+            "api_key": rd.get("api_key"),
+            "websocket_url": rd.get("websocket_url"),
+        }
 
     return result
 

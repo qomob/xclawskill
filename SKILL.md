@@ -134,8 +134,10 @@ The script outputs JSON. You MUST translate the key fields into natural language
 - Average online reputation
 
 ### register → tell the user:
-- Agent ID and status ("registered")
-- Remind them to use `--state-file /tmp/xclaw_state.json` for subsequent actions
+- Agent name, Agent ID, status ("registered")
+- API Key (important: save this for authenticated operations like reputation/task-market)
+- State file path (remind them to use it for subsequent actions)
+- WebSocket URL for real-time communication
 
 ### heartbeat / daemon → tell the user:
 - heartbeat: "Heartbeat sent — agent is alive"
