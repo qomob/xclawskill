@@ -128,8 +128,6 @@ class XClawClient:
     def _ws_connect(self):
         import websocket
         ws_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
-        # Main WSS rejects /ws path (reserved for realtimePushService).
-        # Use /agent-ws — accepted by main WSS, and Nginx won't collide with /ws.
         ws_url += f"/agent-ws?agent_id={self.agent_id}"
         return websocket.create_connection(ws_url, timeout=10)
 
@@ -143,7 +141,7 @@ class XClawClient:
         }
         ws.send(json.dumps(auth))
         resp = json.loads(ws.recv())
-        if resp.get("type") != "AUTH_SUCCESS":
+        if not resp.get("success"):
             ws.close()
             return False
         return True
@@ -248,23 +246,20 @@ def action_send_message(client, recipient_id, content, **_kw):
         if not client._ws_auth(ws):
             return fail("send-message", "WebSocket authentication failed")
 
-        t = now_iso()
         msg = {
             "type": "MESSAGE",
-            "sender_id": client.agent_id,
-            "recipient_id": recipient_id,
-            "content": content,
-            "timestamp": t,
-            "signature": client._sign({
-                "sender_id": client.agent_id, "recipient_id": recipient_id,
-                "content": content, "timestamp": t,
-            }),
+            "to_agent_id": recipient_id,
+            "payload": {
+                "content": content,
+                "timestamp": now_iso(),
+                "sender_id": client.agent_id,
+            },
         }
         ws.send(json.dumps(msg))
         resp = json.loads(ws.recv())
         ws.close()
 
-        if resp.get("type") == "MESSAGE_ACK":
+        if resp.get("success"):
             return ok("send-message", {"recipient_id": recipient_id, "status": "delivered"})
         return fail("send-message", resp.get("error", "Message not acknowledged"))
     except ImportError:
@@ -291,14 +286,13 @@ def action_broadcast(client, content, tags=None, **_kw):
         if not client._ws_auth(ws):
             return fail("broadcast", "WebSocket authentication failed")
 
-        t = now_iso()
         bcast = {
             "type": "BROADCAST",
             "payload": {
                 "sender_id": client.agent_id,
                 "content": content,
                 "tags": tag_list,
-                "timestamp": t,
+                "timestamp": now_iso(),
             },
         }
         ws.send(json.dumps(bcast))
@@ -306,7 +300,6 @@ def action_broadcast(client, content, tags=None, **_kw):
         try:
             resp = json.loads(ws.recv())
         except Exception:
-            # Fire-and-forget: server may not respond if no other clients
             resp = {"success": True}
         ws.close()
 
@@ -332,23 +325,34 @@ def action_health(client, **_kw):
 
     if stats.get("success") and stats.get("data"):
         sd = stats["data"]
+        agents_info = sd.get("agents", {})
         data["global_stats"] = {
-            "total_nodes": sd.get("total_nodes", 0),
-            "online_nodes": sd.get("online_nodes", 0),
-            "online_rate": round(sd.get("online_nodes", 0) / max(1, sd.get("total_nodes", 1)) * 100, 1),
-            "total_tasks": sd.get("total_tasks", 0),
-            "completed_tasks": sd.get("completed_tasks", 0),
-            "task_completion_rate": round(sd.get("completed_tasks", 0) / max(1, sd.get("total_tasks", 1)) * 100, 1),
-            "total_transactions": sd.get("total_transactions", 0),
-            "total_skills": sd.get("total_skills", 0),
+            "online_agents": agents_info.get("online_agents", 0),
+            "memory": sd.get("memory", {}),
+            "relationships": sd.get("relationships", {}),
         }
 
     if topo.get("success") and topo.get("data"):
         nodes = topo["data"].get("nodes", [])
+        links = topo["data"].get("links", [])
         online_nodes = [n for n in nodes if n.get("status") == "online"]
         data["topology_summary"] = {
             "total_nodes": len(nodes),
             "online_nodes": len(online_nodes),
+            "total_links": len(links),
+            "online_rate": round(len(online_nodes) / max(1, len(nodes)) * 100, 1),
+        }
+        if online_nodes:
+            avg_rep = sum(float(n.get("reputation_score", 0)) for n in online_nodes) / len(online_nodes)
+            data["topology_summary"]["avg_reputation"] = round(avg_rep, 2)
+    elif isinstance(topo, dict) and "nodes" in topo:
+        nodes = topo["nodes"]
+        links = topo.get("links", [])
+        online_nodes = [n for n in nodes if n.get("status") == "online"]
+        data["topology_summary"] = {
+            "total_nodes": len(nodes),
+            "online_nodes": len(online_nodes),
+            "total_links": len(links),
             "online_rate": round(len(online_nodes) / max(1, len(nodes)) * 100, 1),
         }
         if online_nodes:
@@ -414,7 +418,10 @@ def action_gap_analysis(client, **_kw):
 def action_reputation(client, limit=20, **_kw):
     leaderboard = client.get("/v1/reputation/leaderboard", params={"limit": str(limit)})
     if not leaderboard.get("success"):
-        return fail("reputation", leaderboard.get("error", "Cannot fetch leaderboard"))
+        err = leaderboard.get("error", "Cannot fetch leaderboard")
+        if "401" in err or "API key" in err:
+            err += " — this endpoint requires --api-key"
+        return fail("reputation", err)
 
     agents = leaderboard.get("data", [])
     ranked = []
@@ -434,15 +441,18 @@ def action_reputation(client, limit=20, **_kw):
     stats = client.get("/v1/stats/global")
     if stats.get("success") and stats.get("data"):
         sd = stats["data"]
-        data["network_stats"] = {"total_nodes": sd.get("total_nodes", 0),
-                                 "avg_reputation": sd.get("avg_reputation", 0)}
+        agents_info = sd.get("agents", {})
+        data["network_stats"] = {"online_agents": agents_info.get("online_agents", 0)}
     return ok("reputation", data)
 
 
 def action_task_market(client, **_kw):
     market_stats = client.get("/v1/task-market/stats")
     if not market_stats.get("success"):
-        return fail("task-market", market_stats.get("error", "Cannot fetch market stats"))
+        err = market_stats.get("error", "Cannot fetch market stats")
+        if "401" in err or "API key" in err:
+            err += " — this endpoint requires --api-key"
+        return fail("task-market", err)
 
     data = {"market_stats": market_stats.get("data", {})}
     browse = client.get("/v1/task-market/browse", params={"limit": "20"})
@@ -520,10 +530,15 @@ def action_semantic_search(client, query=None, **_kw):
 
 def action_topology(client, **_kw):
     topo = client.get("/v1/topology")
-    if not topo.get("success"):
+
+    td = None
+    if topo.get("success") and topo.get("data"):
+        td = topo["data"]
+    elif isinstance(topo, dict) and "nodes" in topo:
+        td = topo
+    if not td:
         return fail("topology", topo.get("error", "Cannot fetch topology"))
 
-    td = topo.get("data", {})
     nodes = td.get("nodes", [])
     links = td.get("links", [])
     online = [n for n in nodes if n.get("status") == "online"]
