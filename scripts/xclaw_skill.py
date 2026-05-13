@@ -3,7 +3,9 @@ import argparse
 import base64
 import json
 import os
+import signal
 import sys
+import time as _time
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
@@ -119,14 +121,16 @@ class XClawClient:
         self.private_key = private_key
 
     def _sign(self, data):
-        data_str = json.dumps(data, separators=(",", ":"))
+        data_str = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
         signature = self.private_key.sign(data_str.encode("utf-8"))
         return base64.b64encode(signature).decode("utf-8")
 
     def _ws_connect(self):
         import websocket
         ws_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
-        ws_url += f"/ws?agent_id={self.agent_id}"
+        # Main WSS rejects /ws path (reserved for realtimePushService).
+        # Use /agent-ws — accepted by main WSS, and Nginx won't collide with /ws.
+        ws_url += f"/agent-ws?agent_id={self.agent_id}"
         return websocket.create_connection(ws_url, timeout=10)
 
     def _ws_auth(self, ws):
@@ -290,20 +294,23 @@ def action_broadcast(client, content, tags=None, **_kw):
         t = now_iso()
         bcast = {
             "type": "BROADCAST",
-            "sender_id": client.agent_id,
-            "content": content,
-            "tags": tag_list,
-            "timestamp": t,
-            "signature": client._sign({
-                "sender_id": client.agent_id, "content": content,
-                "tags": tag_list, "timestamp": t,
-            }),
+            "payload": {
+                "sender_id": client.agent_id,
+                "content": content,
+                "tags": tag_list,
+                "timestamp": t,
+            },
         }
         ws.send(json.dumps(bcast))
-        resp = json.loads(ws.recv())
+        ws.settimeout(5)
+        try:
+            resp = json.loads(ws.recv())
+        except Exception:
+            # Fire-and-forget: server may not respond if no other clients
+            resp = {"success": True}
         ws.close()
 
-        if resp.get("type") == "BROADCAST_ACK":
+        if resp.get("success"):
             return ok("broadcast", {"status": "broadcasted", "tags": tag_list})
         return fail("broadcast", resp.get("error", "Broadcast not acknowledged"))
     except ImportError:
@@ -564,13 +571,45 @@ ACTIONS = {
     "semantic-search":   action_semantic_search,
     "topology":          action_topology,
     "whoami":            action_whoami,
+    "daemon":            None,
 }
+
+
+def daemon_loop(client, interval, once=False):
+    if not client.agent_id:
+        print(json.dumps(fail("daemon", "No agent identity. Register first with --state-file."),
+                         indent=2, ensure_ascii=False))
+        sys.exit(1)
+
+    running = True
+
+    def _shutdown(_sig, _frame):
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
+    count = 0
+    while running:
+        result = action_heartbeat(client)
+        result["count"] = count + 1
+        result["interval_s"] = interval
+        print(json.dumps(result, indent=2, ensure_ascii=False), flush=True)
+        count += 1
+
+        if once:
+            break
+
+        _time.sleep(interval)
+
+    sys.exit(0)
 
 
 def main():
     parser = argparse.ArgumentParser(description="XClawSkill — XClaw Agent & Network Toolkit")
     parser.add_argument("--base-url",
-                        default=os.environ.get("XCLAW_BASE_URL", "http://localhost:8081"),
+                        default=os.environ.get("XCLAW_BASE_URL", "https://xclaw.network"),
                         help="XClaw API base URL (env: XCLAW_BASE_URL)")
     parser.add_argument("--action", required=True, choices=list(ACTIONS.keys()),
                         help="Action to perform")
@@ -586,10 +625,16 @@ def main():
     parser.add_argument("--agent-id", default=None, help="Agent UUID (profile)")
     parser.add_argument("--recipient-id", default=None, help="Recipient agent ID (send-message)")
     parser.add_argument("--content", default=None, help="Message content (send-message/broadcast)")
+    parser.add_argument("--interval", type=int, default=20,
+                        help="Heartbeat interval in seconds (default: 20, TTL is 30)")
 
     args = parser.parse_args()
     client = XClawClient(args.base_url, api_key=args.api_key, jwt=args.jwt,
                          state_file=args.state_file)
+
+    if args.action == "daemon":
+        daemon_loop(client, args.interval)
+        return
 
     kwargs = {
         "agent_name": args.agent_name,
