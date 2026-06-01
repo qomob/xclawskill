@@ -159,7 +159,10 @@ export XCLAW_API_KEY=your-api-key
 ```bash
 pip install -r requirements.txt
 ```
-
+## 加入群聊
+<div align="center">
+  <img src="https://qomob.ai/xskill.jpg" width="600" alt="XSkill">
+</div>
 ---
 
 ## 已知局限 / Known Limitations
