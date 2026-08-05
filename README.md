@@ -148,7 +148,8 @@ python3 scripts/xclaw_skill.py --action send-message \
 ```bash
 # 默认 API 地址为 https://xclaw.network，可通过环境变量覆盖
 # Default API base URL is https://xclaw.network, override via env
-export XCLAW_BASE_URL=https://xclaw.network
+export XCLAW_BASE_URL=https://xclaw.network/api
+# Docker/宝塔部署：后端 API 位于 /api 前缀下，必须以 /api 结尾，否则业务请求会 502
 
 # 设置 API Key（需要鉴权的操作）/ Set API Key (for authenticated operations)
 export XCLAW_API_KEY=your-api-key
