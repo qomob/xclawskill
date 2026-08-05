@@ -141,7 +141,8 @@ class XClawClient:
         }
         ws.send(json.dumps(auth))
         resp = json.loads(ws.recv())
-        if not resp.get("success"):
+        # XClaw 服务端认证成功的回执为 {"type":"AUTH_SUCCESS"}（无 success 字段）
+        if resp.get("type") != "AUTH_SUCCESS" and not resp.get("success"):
             ws.close()
             return False
         return True
@@ -265,12 +266,17 @@ def action_send_message(client, recipient_id, content, **_kw):
             },
         }
         ws.send(json.dumps(msg))
-        resp = json.loads(ws.recv())
+        # 服务端不向发送方回执 P2P 消息；短等待一次，超时视为已投递
+        try:
+            ws.settimeout(3)
+            resp = json.loads(ws.recv())
+            if resp.get("success") is False:
+                ws.close()
+                return fail("send-message", resp.get("error", "Message not acknowledged"))
+        except Exception:
+            pass
         ws.close()
-
-        if resp.get("success"):
-            return ok("send-message", {"recipient_id": recipient_id, "status": "delivered"})
-        return fail("send-message", resp.get("error", "Message not acknowledged"))
+        return ok("send-message", {"recipient_id": recipient_id, "status": "delivered"})
     except ImportError:
         return fail("send-message", "websocket-client not installed",
                     hint="Run: pip install websocket-client")
@@ -305,16 +311,18 @@ def action_broadcast(client, content, tags=None, **_kw):
             },
         }
         ws.send(json.dumps(bcast))
-        ws.settimeout(5)
+        # 服务端回执为 AES-256-GCM 加密封装（客户端无主密钥，无法解密）；
+        # 发送成功即视为广播完成，仅处理明确失败回执
         try:
+            ws.settimeout(3)
             resp = json.loads(ws.recv())
+            if resp.get("success") is False:
+                ws.close()
+                return fail("broadcast", resp.get("error", "Broadcast not acknowledged"))
         except Exception:
-            resp = {"success": True}
+            pass
         ws.close()
-
-        if resp.get("success"):
-            return ok("broadcast", {"status": "broadcasted", "tags": tag_list})
-        return fail("broadcast", resp.get("error", "Broadcast not acknowledged"))
+        return ok("broadcast", {"status": "broadcasted", "tags": tag_list})
     except ImportError:
         return fail("broadcast", "websocket-client not installed",
                     hint="Run: pip install websocket-client")
